@@ -14,6 +14,8 @@ On this installation the default Unix socket is
 `~/.config/herdr/sessions/<name>/herdr.sock`. `HERDR_SOCKET_PATH` is the native
 explicit endpoint override and is injected into managed panes and plugin commands.
 `HERDR_SESSION` selects a named session when no explicit socket is supplied.
+With `XDG_CONFIG_HOME` set, the root is `$XDG_CONFIG_HOME/herdr` instead.
+`HERDR_CONFIG_PATH` changes the configuration file, not the socket root.
 The Go bridge also accepts `--socket`. macOS and Linux Unix sockets are in scope;
 Windows named pipes and remote-machine multiplexing are not.
 
@@ -197,6 +199,8 @@ Do not ship a misleading `[[events]]` daemon launcher.
 - Installed `herdr api schema --json`, `herdr --help`, `herdr agent`, `herdr pane`,
   `herdr status server`, `herdr session list --json` (0.9.5).
 - [Herdr 0.9.5 socket API](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/socket-api.mdx).
+- [Herdr 0.9.5 config root](https://github.com/herdrdev/herdr/blob/v0.9.5/src/config/io.rs)
+  and [session endpoint selection](https://github.com/herdrdev/herdr/blob/v0.9.5/src/session.rs).
 - [Herdr 0.9.5 plugins and lifecycle](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/plugins.mdx).
 - [Herdr 0.9.5 agent status semantics](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/agents.mdx).
 - Local reference: `ccgram/src/ccgram/multiplexer/herdr_socket.py`,
