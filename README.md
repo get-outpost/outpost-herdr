@@ -10,6 +10,7 @@ Outpost Server internals or depending on the client SDK being extracted there.
 - Event subscription, reconnect, topology-aware status coverage, and authoritative
   re-sync after subscription. Transport failure never means every session ended.
 - `session.started`, `session.updated`, and `session.ended`; `done` maps to `idle`.
+  Late fallback-to-native-ID promotion emits `session.deleted` for the fallback.
 - Native session IDs passed through unchanged, allowing Claude's hook and this
   adapter to publish to one Outpost session. Stable namespaced hashed fallbacks
   for session paths and terminal/pane identities.
@@ -47,6 +48,21 @@ The default socket follows `HERDR_SOCKET_PATH`, then `HERDR_SESSION` under
 Keep `--namespace` stable and unique for
 each machine/Herdr session; the default is `hostname:socket-path`. It affects
 fallback IDs only, never native IDs. Stop with SIGINT or SIGTERM.
+
+Agents without a nonempty native `id` or `path` session reference wait up to
+10 seconds before a fallback `session.started`. The first known status
+(`working`, `idle`, `blocked`, or `done`) releases that wait early, including
+when it is already known in the first snapshot. A native reference publishes
+immediately. Use `--session-grace 20s` to change the duration, or
+`--session-grace 0` to disable it; negative durations are rejected. The adapter
+API exposes the same setting as `Adapter.SessionGracePeriod` (set before `Run`).
+Repeated snapshots and pane moves do not restart the grace clock. Agents that
+disappear during grace produce no lifecycle events.
+
+If a native ID arrives after a fallback was published for the same local agent,
+the adapter emits `session.deleted` for that fallback **before** starting the
+native session. The tombstone hides the duplicate from clients by default.
+Actual exits and unrelated replacements still emit `session.ended`.
 
 ### Opt-in commands
 
@@ -114,7 +130,14 @@ without `--commands` and malformed command JSON exits nonzero. Live
 `--snapshot` succeeded against Herdr 0.9.5/protocol 22; no live agent input was
 used for verification.
 
-## Deployment decision and open questions
+Phase 1b added deterministic virtual-time tests (`testing/synctest`) for grace
+deadlines, reference/status arrival, pane moves, disappearance and promotion.
+Race tests, vet and the CLI build passed again. Isolated executable smoke runs
+observed native-only publication within grace, timer-driven fallback publication
+followed by delete-before-native-start, and early release on a known status.
+Negative CLI grace was rejected; no live agent input was used.
+
+## Deployment and integration decisions
 
 Use an **external daemon per Herdr session**, not an event hook pretending to be
 a daemon. Herdr startup hooks are one-shot, not supervised services; plugin panes
@@ -123,24 +146,39 @@ installer/action is possible once its supervisor lifecycle is specified. See
 [the protocol investigation](docs/herdr-protocol.md) for framing, exact fallback
 hash inputs, observed schema differences, keybindings and primary sources.
 
-Remaining integration decisions:
+### Ownership and credentials
 
-1. **SDK command routing and ownership:** the server's `owner_device_id` is the
-   first publisher, and a Claude hook may own the shared native session before
-   this adapter. An SDK Sink must deliver message/interrupt commands for locally
-   managed sessions even when the hook is the first publisher; approval stays
-   with the hook. Server device ownership is not local execution capability.
-2. **Durability:** snapshots restore current state, not missed history. Adapter
-   state and the memory fake are process-local; a daemon restart republishes
-   active starts, and cannot end sessions that vanished while it was stopped.
-   SDK reconnect/backfill must not replay already executed prompts.
-3. **Fallback promotion:** a late native session reference ends the earlier
-   fallback session and starts the native ID. No server alias/merge API exists.
-   Install native Herdr integrations before starting agents to reduce this gap.
-4. **Input identity race:** revalidation reduces pane-reuse risk but the public
-   Herdr API cannot atomically compare an expected native session when admitting
-   input. Queue admission also cannot prove agent execution.
-5. **Dual publisher fields:** Herdr calls Claude's provider `claude`; the existing
-   hook uses `claude-code`. Same session ID avoids duplicate sessions, but the
-   latest start can change the provider label. Device routing, shared lifecycle
-   ownership and canonical provider naming need agreement with the SDK/server.
+For this adapter, **owned means currently mapped to a live local agent**.
+Do not filter commands by whether `owner_device_id` matches the daemon's device:
+a hook-first Claude session must still accept daemon message/interrupt commands,
+since the hook cannot execute them. Live `agent.get` identity revalidation remains
+mandatory before input; `command.approve` stays with the native hook.
+
+Recommended deployment: **one plugin device per machine**, shared by the Claude
+hook and Herdr daemon through the same `outpost login` config. Sharing that
+identity also keeps server `owner_device_id` consistent. Do not create separate
+per-adapter plugin logins on the same machine. Phase 1's JSON-lines bridge does
+not read login credentials yet; config sharing belongs to the SDK-backed Sink.
+Never put tokens in source, plugin manifests, or command examples.
+
+### Provider names
+
+Canonical providers are Herdr agent kinds: `claude`, `codex`, `pi`, `omp`,
+`opencode`, and the other recognized kinds. This adapter continues to emit
+`claude`; the Claude hook is being aligned to the same name. Adopt the shared
+provider constants from `github.com/get-outpost/outpost-go` when integrating
+the SDK; no SDK dependency is added in this phase.
+
+### Remaining limits
+
+- **Durability:** snapshots restore current state, not missed history. Adapter
+  state and the memory fake are process-local; a daemon restart republishes
+  active starts and cannot end sessions that vanished while it was stopped.
+  SDK reconnect/backfill must not replay already executed prompts.
+- **Fallback promotion:** grace and tombstones mitigate duplicate sessions;
+  there is no server alias/merge API. Install native Herdr integrations before
+  starting agents. Promotion follows the same agent kind and terminal identity,
+  or pane ID when the previous agent had no terminal identity.
+- **Input identity race:** revalidation reduces pane-reuse risk but the public
+  Herdr API cannot atomically compare an expected native session when admitting
+  input. Queue admission also cannot prove agent execution.

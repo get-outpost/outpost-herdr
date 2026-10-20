@@ -121,9 +121,10 @@ never be observed. Periodic reconciliation also catches missed invalidations.
 
 Native session IDs (`agent_session.kind == "id"`, nonempty value) are passed
 through unchanged. Claude therefore uses the **same** `session_id` as its hook,
-not an adapter-prefixed ID. Providers remain the Herdr kind (for example
-`claude`); the existing Claude hook calls its provider `claude-code`, so mixed
-publishers can overwrite the provider label without creating a second session.
+not an adapter-prefixed ID. Providers are canonically the Herdr agent kind
+(`claude`, `codex`, `pi`, `omp`, `opencode`, …). The adapter emits `claude`;
+the Claude hook is being aligned to that same value. Shared SDK provider
+constants will replace these strings when the SDK is adopted.
 
 Fallback identity is `herdr:` followed by lowercase hex SHA-256. Each input is a
 UTF-8 string prefixed by its uint64 big-endian byte length; hash these fields:
@@ -133,11 +134,23 @@ UTF-8 string prefixed by its uint64 big-endian byte length; hash these fields:
 - Pane (only without terminal ID): `[namespace, "pane", agent.agent, agent.pane_id]`.
 
 Paths are not normalized. Revisions and display names are not identity. Keep
-`--namespace` stable and unique per machine/Herdr session. Native ID appearance
-later is an identity change: the fallback session ends and the native session
-starts. There is no server alias/merge API to hide that earlier fallback row.
-Install `herdr integration install <agent>` **before starting the agent** to
-improve native reference availability; this bridge does not alter integrations.
+`--namespace` stable and unique per machine/Herdr session.
+
+For an agent without a valid nonempty `id` or `path` reference, delay publication
+until a configurable grace period expires (default 10 seconds) or its first
+known status arrives, whichever comes first. A known status on the initial
+snapshot releases immediately. Native references do not wait. A timer releases
+expired grace even without another Herdr event; refreshes and pane moves retain
+the original deadline. An agent disappearing before publication emits nothing.
+Configure `--session-grace` or `Adapter.SessionGracePeriod`; zero disables grace.
+
+If a native ID appears after a fallback was published for that same local agent,
+publish `session.deleted` for the fallback before starting the native ID.
+This tombstone hides the duplicate from default client listings; it is not an
+alias/merge API. Match promotion by agent kind and terminal ID, or by pane ID
+when no previous terminal ID exists. Unrelated replacements and exits still end
+normally. Install `herdr integration install <agent>` **before starting the agent**
+to improve native reference availability; this bridge does not alter integrations.
 
 The start event chooses cwd from `foreground_cwd`, then `cwd`; title from
 `name`, `title`, `terminal_title_stripped`, `terminal_title`, `display_agent`,
@@ -153,9 +166,12 @@ one session and do not end until the last matching local agent disappears.
 invalid. `command.interrupt` sends exactly one `esc`, not Ctrl+C, double Escape,
 or a process signal. `command.approve` is ignored; Claude approvals stay with
 its native hook. Encrypted commands cannot be interpreted and are ignored.
-Only currently mapped local session IDs are actionable. Before sending, read
-`agent.get` again and compare identity to reject pane reuse. This reduces but
-cannot atomically eliminate the race between that read and Herdr's input queue:
+Only sessions currently mapped to live local agents are owned/actionable.
+Server `owner_device_id` is not an execution filter: a hook-first session still
+needs this daemon for message/interrupt commands. Deploy one plugin device per
+machine, shared with its Claude hook via the same `outpost login` config.
+Before sending, read `agent.get` again and compare identity to reject pane reuse.
+This reduces but cannot atomically eliminate the read/input-queue race:
 the public input API has no expected-session guard.
 
 | Herdr agent kind | Escape evidence and limits |
