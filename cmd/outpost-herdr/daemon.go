@@ -14,6 +14,7 @@ import (
 	"github.com/get-outpost/outpost-herdr/internal/herdr"
 	"github.com/get-outpost/outpost-herdr/internal/relay"
 	"github.com/get-outpost/outpost-herdr/internal/state"
+	"github.com/get-outpost/outpost-herdr/internal/transcript"
 )
 
 type daemonOptions struct {
@@ -56,11 +57,26 @@ func runDaemon(ctx context.Context, source herdr.Source, options daemonOptions) 
 		}
 		return errors.Join(err, shutdownErr)
 	}
+	conversations, err := transcript.New(sink, store, options.namespace, transcript.Options{Logger: logger})
+	if err != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), options.flushTimeout)
+		defer cancel()
+		return errors.Join(err, sink.Shutdown(flushCtx))
+	}
+	if err := conversations.Start(); err != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), options.flushTimeout)
+		defer cancel()
+		return errors.Join(err, conversations.Close(flushCtx), sink.Shutdown(flushCtx))
+	}
 	logger.Info("Outpost Herdr daemon started", "namespace", options.namespace)
-	watched := scopedSource{Source: source, namespace: options.namespace, pane: options.pane, localSessions: sink.SetLocalSessions}
+	watched := scopedSource{
+		Source: source, namespace: options.namespace, pane: options.pane,
+		localSessions: sink.SetLocalSessions, transcriptSessions: conversations.UpdateSessions,
+	}
 	bridge := adapter.New(watched, sink, options.namespace)
 	bridge.SessionGracePeriod = options.sessionGrace
 	bridge.PreviouslyLive = previouslyLive
+	bridge.MessageDelivered = conversations.Delivered
 	adapterCtx, cancelAdapter := context.WithCancel(ctx)
 	defer cancelAdapter()
 	finished := make(chan error, 1)
@@ -74,6 +90,9 @@ func runDaemon(ctx context.Context, source herdr.Source, options daemonOptions) 
 	case result = <-sink.Errors():
 		cancelAdapter()
 		<-finished
+	case result = <-conversations.Errors():
+		cancelAdapter()
+		<-finished
 	}
 	// A signal can race a fatal worker error. Do not turn a rejected credential
 	// into a successful shutdown just because the adapter stopped first.
@@ -83,11 +102,18 @@ func runDaemon(ctx context.Context, source herdr.Source, options daemonOptions) 
 		default:
 		}
 	}
+	if result == nil {
+		select {
+		case result = <-conversations.Errors():
+		default:
+		}
+	}
 	flushCtx, cancelFlush := context.WithTimeout(context.Background(), options.flushTimeout)
 	defer cancelFlush()
+	transcriptErr := conversations.Close(flushCtx)
 	flushErr := sink.Shutdown(flushCtx)
 	logger.Info("Outpost Herdr daemon stopped")
-	return errors.Join(result, flushErr)
+	return errors.Join(result, transcriptErr, flushErr)
 }
 
 // scopedSource exposes only the selected local agents and updates the command
@@ -95,9 +121,10 @@ func runDaemon(ctx context.Context, source herdr.Source, options daemonOptions) 
 // Controls still delegate to the original Source and retain GetAgent revalidation.
 type scopedSource struct {
 	herdr.Source
-	namespace     string
-	pane          string
-	localSessions func([]string)
+	namespace          string
+	pane               string
+	localSessions      func([]string)
+	transcriptSessions func([]herdr.Agent)
 }
 
 func (s scopedSource) Watch(ctx context.Context, consume func(herdr.Snapshot) error) error {
@@ -117,7 +144,13 @@ func (s scopedSource) Watch(ctx context.Context, consume func(herdr.Snapshot) er
 			}
 			s.localSessions(ids)
 		}
-		return consume(snapshot)
+		if err := consume(snapshot); err != nil {
+			return err
+		}
+		if s.transcriptSessions != nil {
+			s.transcriptSessions(snapshot.Agents)
+		}
+		return nil
 	})
 }
 

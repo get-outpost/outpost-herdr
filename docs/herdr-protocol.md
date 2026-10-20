@@ -161,6 +161,12 @@ status through `session.updated {status}`. `done` means unseen idle completion i
 Herdr and maps to `idle`, not session end. `unknown` does not fabricate idle.
 A disappeared/replaced agent causes `session.ended`; duplicate native IDs are
 one session and do not end until the last matching local agent disappears.
+On daemon restart, a session already in the durable live set is re-synced with
+`session.updated {status,title,cwd}` instead of another `session.started`. Unknown
+status is omitted; genuine new identities and promotions still start normally.
+Native conversation tailing is a separate asynchronous source, not terminal
+screen scraping; supported formats and Claude's assistant-only policy are in the
+README.
 
 `command.message {text}` submits through `agent.prompt`. Whitespace-only text is
 invalid. `command.interrupt` sends exactly one `esc`, not Ctrl+C, double Escape,

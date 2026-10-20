@@ -13,6 +13,8 @@ internal imports or local module replacements.
   startup grace, and fallback tombstones on late native-ID promotion.
 - `session.started`, semantic status updates, and `session.ended` on exit.
   Herdr `done` maps to `idle`; unknown state never fabricates idle.
+- `message.created` user/assistant conversation text from native transcripts,
+  with bounded backfill, stable IDs and durable tail checkpoints.
 - SDK HTTP publication through a bounded FIFO queue, transient-failure retries,
   a resumable command stream, and deadline-bounded shutdown flushing.
 - Durable command cursor and published-live session set, including exits missed
@@ -21,9 +23,9 @@ internal imports or local module replacements.
   `command.interrupt` through one Escape. Each command revalidates live identity.
 - Shared `outpost login` credentials and a separate JSON-lines dry-run mode.
 
-Approval commands remain with the native Claude hook. No terminal transcript
-streaming, structured tool telemetry, Windows named pipes, or service
-installation is included.
+Approval commands remain with the native Claude hook. Raw terminal streaming,
+structured tool telemetry, Windows named pipes and service installation are not
+included.
 
 ## Run the daemon
 
@@ -113,15 +115,18 @@ are deliberately not interpreted here.
 
 State lives at `$XDG_STATE_HOME/outpost-herdr/<sha256(namespace)>.json`, falling
 back to `~/.local/state/outpost-herdr/`. The private directory is mode `0700`,
-files `0600`. Atomic replacement stores the cursor and successfully published
-live-session IDs together. Corrupt state is fatal, not silently reset to zero.
-State contains session IDs/cursors in plaintext, but no token or event payloads.
+files `0600`. Atomic replacement stores the cursor, published-live session IDs
+and per-session transcript checkpoints together. Corrupt state is fatal, not
+silently reset to zero. State contains IDs/cursors, offsets, file fingerprints
+and deduplication hashes in plaintext, but no token, message text or native path.
 
 Starts and updates accepted by the server add a live ID; accepted ends and
 tombstones remove it. After the first authoritative Herdr snapshot on startup,
-previously live IDs absent locally receive `session.ended`. Current agents get
-`session.started` again. Previously published fallbacks are re-announced without
-another grace period, preserving subsequent promotion/exit tracking.
+previously live IDs absent locally receive `session.ended`. Existing live agents
+are re-synced with `session.updated {status,title,cwd}`; an unknown status is
+omitted rather than fabricated. This does **not** add another Session Started
+card. New sessions and native-ID promotions still use `session.started`.
+Previously published fallbacks are updated without another grace period.
 
 Agents without a nonempty native `id` or `path` reference wait until grace
 expires or their first known status (`working`, `idle`, `blocked`, `done`),
@@ -140,6 +145,64 @@ Canonical provider names are Herdr kinds (`claude`, `codex`, `pi`, `omp`,
 `opencode`); unknown kinds pass through unchanged. Protocol vocabulary/status
 constants come from the SDK. There is no server alias/merge API.
 
+## Native conversation content
+
+`run` observes native transcripts independently of the Herdr watcher and emits
+`message.created {role,text,message_id}`. Only user turns and final assistant
+text are relayed. Thinking, system entries, tool calls/results, and assistant
+tool-call preambles are excluded.
+
+| Provider | Native source and supported text |
+| --- | --- |
+| `omp`, `pi` | The JSONL file from an `agent_session` path reference; native message envelopes |
+| `claude` | Exact session ID under `~/.claude/projects/*/<id>.jsonl`; assistant text only |
+| `codex` | Matching rollout under `$CODEX_HOME/sessions` or `~/.codex/sessions`; canonical `response_item` user messages and explicitly final assistant messages |
+| Others | No native parser; admitted daemon messages can use the fallback below |
+
+Codex assistant records require `phase: "final_answer"` or `channel: "final"`.
+Mirrored `event_msg` / `input_item` records, streaming deltas and unmarked legacy
+assistant records are deliberately not relayed: importing both representations
+would duplicate turns or expose unfinished commentary. Ambiguous or unsafe
+session discovery is treated as unavailable, not guessed from cwd or newest file.
+
+First sight backfills the last **20 eligible conversational messages** in order,
+then tails new complete lines. Every message is at most **32 KiB of UTF-8**,
+including a visible truncation marker. A partial final line waits for its
+newline. Replacement, truncation, rotation and rewritten prefixes trigger safe
+re-scanning with persisted seen IDs, including IDs skipped by initial backfill.
+Raw JSONL records above 16 MiB are drained/skipped rather than allocated without
+bound. No real transcript content is committed in the parser fixtures.
+
+`message_id` hashes the session plus native entry ID, or uses a deterministic
+offset/content hash when no native ID exists; it never reveals a native path.
+Checkpoints share the atomic namespace state file. A clean shutdown performs a
+final tail scan before draining the relay queue, so clean restarts do not repost
+the backfill or old messages.
+
+Checkpoint advancement follows **queue admission**, not the server's HTTP ack.
+The queue is not a durable outbox: a crash can lose admitted messages or leave a
+small admission/checkpoint replay window. Stable IDs allow downstream dedupe;
+HTTP retry ambiguity is not an exactly-once guarantee. Large first-run backfills
+may require increasing `--queue-size` for many simultaneous sessions.
+
+### Claude ownership and no-transcript fallback
+
+For **Claude, the daemon publishes assistant messages only**, including when no
+transcript can be found: there is no user fallback. Claude Code's
+`UserPromptSubmit` hook publishes user text even when the prompt was injected
+through `agent.prompt`. Publishing it here too would duplicate that turn. If the
+hook is absent, the app's optimistic Sent bubble still covers phone-sent text;
+terminal user turns are not supplied by this daemon for Claude.
+
+For other providers, when no supported native transcript resolves, an admitted
+`command.message` produces a user `message.created` with a stable command-based
+ID. Rejected prompts produce no fallback. There is no synthetic assistant reply.
+If a transcript appears later, an echo is suppressed only with positive entry /
+command identity; matching text alone is not enough to discard a real repeated
+turn. Formats with unrelated native IDs can therefore show both the fallback
+and later backfilled user text. Ordinary transcript restart/rotation dedupe does
+not rely on text-only guessing.
+
 ## JSON-lines dry run
 
 ```sh
@@ -151,6 +214,8 @@ constants come from the SDK. There is no server alias/merge API.
 ```
 
 Bare legacy invocations without a subcommand retain this dry-run behavior.
+This mode remains metadata/status-only and does not open native transcripts or
+persist conversation offsets.
 Stdin is ignored unless `--commands` is explicitly passed. With that opt-in,
 stdin command JSON lines can intentionally control a locally mapped session:
 
@@ -190,8 +255,9 @@ service is installed by this repository or by running the daemon.** If increasin
 | `internal/herdr` | Socket transport, typed models, authoritative subscription recovery |
 | `internal/adapter` | Identity, grace/promotion, lifecycle reconciliation, live command revalidation, unchanged `Sink` and `MemorySink` |
 | `internal/relay` | SDK publication queue, command stream, durable dispatch safety, shutdown |
-| `internal/state` | Atomic namespace-scoped cursor and live-session storage |
+| `internal/state` | Atomic namespace cursor, live sessions and transcript checkpoints |
 | `internal/config` | Environment-first shared login loading |
+| `internal/transcript` | Native text parsing/discovery, bounded asynchronous tailing, backfill and admitted-message fallback |
 | `cmd/outpost-herdr` | Daemon, scoped observation and JSON-lines dry run |
 
 ```sh
@@ -206,7 +272,12 @@ head initialization, fresh command execution, stale-command logging/drop,
 event-only cursor persistence, clean signal flushing, restart without command
 replay, and ended reconciliation for an agent that exited while offline.
 
-### Live E2E evidence
+Phase-three verification passed the full race suite, vet and a CLI build. An
+isolated executable run checked last-20 backfill, partial-line completion,
+tool-preamble filtering, stable IDs, copied-file replacement, same-path
+truncation, and a clean restart with unchanged conversation/start counts.
+
+### Phase-two live E2E evidence (before restart polish)
 
 Completed with a disposable OMP agent on the inexpensive GPT-6 Luna model,
 the local relay, and the SwiftUI client. The daemon observed only its own pane
