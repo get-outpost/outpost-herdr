@@ -1,0 +1,14 @@
+{"type":"session_meta","payload":{"id":"codex-demo","cwd":"/synthetic/project"}}
+{"type":"response_item","timestamp":"2023-11-14T22:13:20Z","payload":{"type":"message","id":"codex-user-1","role":"user","content":[{"type":"input_text","text":"Explain the "},{"type":"input_image","image_url":"SYNTHETIC_IMAGE"},{"type":"input_text","text":"sample."}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Explain the sample."}}
+{"type":"input_item","payload":{"type":"message","role":"user","content":"Explain the sample."}}
+{"type":"response_item","payload":{"type":"message","id":"codex-commentary","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I will inspect a tool."}]}}
+{"type":"response_item","payload":{"type":"reasoning","content":[{"type":"output_text","text":"PRIVATE_REASONING"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"read","arguments":"SYNTHETIC_ARGUMENTS"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"PRIVATE_TOOL_OUTPUT"}}
+{"type":"response_item","timestamp":"2023-11-14T22:13:21Z","payload":{"type":"message","id":"codex-assistant-1","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"The sample "},{"type":"output_text","text":"is ready."}]}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"The sample is ready."}}
+{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"The sample is ready."}}
+{"type":"response_item","payload":{"type":"message","id":"codex-analysis","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"PRIVATE_REASONING"}]}}
+{"type":"response_item","timestamp":"2023-11-14T22:13:22Z","payload":{"type":"message","id":"codex-assistant-2","role":"assistant","channel":"final","content":[{"type":"output_text","text":"A channel-final answer."}]}}
+{"type":"response_item","payload":{"type":"message","id":"codex-unmarked","role":"assistant","content":[{"type":"output_text","text":"Unclassified assistant text."}]}}

@@ -1,0 +1,9 @@
+{"type":"user","uuid":"claude-user-1","timestamp":"2023-11-14T22:13:20.123Z","message":{"role":"user","content":"Explain the sample."}}
+{"type":"assistant","uuid":"claude-preamble","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect a tool."},{"type":"tool_use","id":"tool-demo","name":"Read","input":{"file_path":"synthetic.txt"}}],"stop_reason":"tool_use"}}
+{"type":"user","uuid":"claude-tool-result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-demo","content":"PRIVATE_TOOL_OUTPUT"}]}}
+{"type":"assistant","uuid":"claude-assistant-1","timestamp":"2023-11-14T22:13:21Z","message":{"id":"request-not-entry","role":"assistant","content":[{"type":"thinking","thinking":"PRIVATE_REASONING"},{"type":"text","text":"The sample "},{"type":"text","text":"is ready."}],"stop_reason":"end_turn"}}
+{"type":"system","uuid":"claude-system","message":{"role":"system","content":"PRIVATE_SYSTEM"}}
+{"type":"assistant","uuid":"claude-abort","message":{"role":"assistant","content":"Partial answer.","stop_reason":"aborted"}}
+{"type":"assistant","uuid":"claude-api-error","isApiErrorMessage":true,"message":{"role":"assistant","content":"SYNTHETIC_ERROR","stop_reason":"end_turn"}}
+{"type":"user","uuid":"claude-meta","isMeta":true,"message":{"role":"user","content":"PRIVATE_META"}}
+{"type":"assistant","uuid":"claude-assistant-2","timestamp":"2023-11-14T22:13:22Z","message":{"role":"assistant","content":[{"type":"text","text":"Persisted answer without a stop marker."}],"stop_reason":null}}

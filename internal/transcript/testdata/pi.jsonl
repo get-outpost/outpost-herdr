@@ -1,0 +1,11 @@
+{"type":"session","id":"synthetic-session","version":3}
+{"type":"message","id":"pi-user-1","parentId":null,"message":{"role":"user","content":[{"type":"text","text":"Explain the "},{"type":"image","data":"SYNTHETIC_IMAGE"},{"type":"text","text":"sample."}],"timestamp":1700000000000}}
+{"type":"message","id":"pi-preamble","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect a tool."}],"stopReason":"toolUse"}}
+{"type":"message","id":"pi-tool","message":{"role":"assistant","content":[{"type":"text","text":"Tool preamble."},{"type":"toolCall","id":"call-demo","name":"read","arguments":{"path":"synthetic.txt"}}],"stopReason":"stop"}}
+{"type":"message","id":"pi-result","message":{"role":"toolResult","content":[{"type":"text","text":"PRIVATE_TOOL_OUTPUT"}]}}
+{"type":"message","id":"pi-assistant-1","parentId":"pi-result","timestamp":"2023-11-14T22:13:21Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"PRIVATE_REASONING"},{"type":"text","text":"The sample "},{"type":"text","text":"is ready."}],"stopReason":"stop"}}
+{"type":"message","id":"pi-error","message":{"role":"assistant","content":[{"type":"text","text":"Partial failed answer."}],"stopReason":"error","errorMessage":"SYNTHETIC_ERROR"}}
+{"type":"message","id":"pi-abort","message":{"role":"assistant","content":"Partial aborted answer.","stopReason":"aborted"}}
+{"type":"message","id":"pi-system","message":{"role":"system","content":"PRIVATE_SYSTEM"}}
+{"type":"message","id":"pi-user-2","message":{"role":"user","content":"A second question.","timestamp":1700000002000}}
+{"type":"message","id":"pi-assistant-2","message":{"role":"assistant","content":"A second answer.","stopReason":"stop","timestamp":1700000003000}}
