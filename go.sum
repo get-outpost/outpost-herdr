@@ -1,0 +1,4 @@
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
+github.com/get-outpost/outpost-go v0.1.0 h1:MFdQu5QnEKZt5FB5RRHDt3aLA24zlg0DLrsE1PcRANQ=
+github.com/get-outpost/outpost-go v0.1.0/go.mod h1:scQwj9m9SSWS8S8rPHY9o86QgY+50jT47jRSTBJOtqM=
