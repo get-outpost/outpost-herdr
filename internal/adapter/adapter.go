@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/get-outpost/outpost-go"
 	"github.com/get-outpost/outpost-herdr/internal/herdr"
 )
 
@@ -19,7 +20,8 @@ import (
 const DefaultSessionGracePeriod = 10 * time.Second
 
 // Adapter translates authoritative herdr snapshots and executes commands for
-// sessions currently present in those snapshots. Its state is in memory only.
+// sessions currently present in those snapshots. PreviouslyLive seeds recovery
+// from the daemon's durable record; current routing state remains in memory.
 type Adapter struct {
 	source    herdr.Source
 	sink      Sink
@@ -30,6 +32,11 @@ type Adapter struct {
 	// this duration elapses or a known status arrives. Set before Run; zero
 	// disables the delay. New defaults to ten seconds.
 	SessionGracePeriod time.Duration
+
+	// PreviouslyLive is the persisted live session set captured before startup.
+	// The first snapshot ends absent IDs and re-announces current agents.
+	// Set before Run; IDs should be unique and nonempty.
+	PreviouslyLive []string
 }
 
 // New constructs an adapter. namespace must be a stable, nonblank identifier for
@@ -90,8 +97,9 @@ type session struct {
 }
 
 type runner struct {
-	adapter  *Adapter
-	sessions map[string]session
+	adapter      *Adapter
+	sessions     map[string]session
+	previousLive map[string]struct{}
 }
 
 // Run watches snapshots and commands until cancellation or an error. Commands
@@ -143,6 +151,12 @@ func (a *Adapter) Run(ctx context.Context) error {
 	}()
 
 	r := runner{adapter: a, sessions: make(map[string]session)}
+	if len(a.PreviouslyLive) > 0 {
+		r.previousLive = make(map[string]struct{}, len(a.PreviouslyLive))
+		for _, id := range a.PreviouslyLive {
+			r.previousLive[id] = struct{}{}
+		}
+	}
 	var latest herdr.Snapshot
 	var startTimer *time.Timer
 	var starts <-chan time.Time
@@ -228,13 +242,26 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 		})
 		next[id] = current
 	}
+	// Wait for an authoritative snapshot before declaring an offline exit.
+	// Current IDs include grace-pending agents, not just published starts.
+	if len(r.previousLive) > 0 {
+		for _, id := range r.adapter.PreviouslyLive {
+			if _, restoring := r.previousLive[id]; restoring {
+				if _, present := next[id]; !present {
+					if err := r.publish(ctx, outpost.SessionEnded, id, nil); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
 
 	for _, id := range sortedSessionIDs(r.sessions) {
 		if previous := r.sessions[id]; previous.started {
 			if _, exists := next[id]; !exists {
-				kind := "session.ended"
+				kind := outpost.SessionEnded
 				if promotedToNative(previous, next) {
-					kind = "session.deleted"
+					kind = outpost.SessionDeleted
 				}
 				if err := r.publish(ctx, kind, id, nil); err != nil {
 					return err
@@ -250,7 +277,8 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 		if !exists {
 			current.startAfter = now.Add(r.adapter.SessionGracePeriod)
 		}
-		if !current.started && !hasSessionRef(agent) && status(agent.AgentStatus) == "" && now.Before(current.startAfter) {
+		_, previouslyPublished := r.previousLive[id]
+		if !current.started && !previouslyPublished && !hasSessionRef(agent) && status(agent.AgentStatus) == "" && now.Before(current.startAfter) {
 			next[id] = current
 			continue
 		}
@@ -260,7 +288,7 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 				"cwd":      firstNonblank(agent.ForegroundCwd, agent.Cwd),
 				"title":    firstNonblank(agent.Name, agent.Title, agent.TerminalTitleStripped, agent.TerminalTitle, agent.DisplayAgent, agent.Agent),
 			}
-			if err := r.publish(ctx, "session.started", id, payload); err != nil {
+			if err := r.publish(ctx, outpost.SessionStarted, id, payload); err != nil {
 				return err
 			}
 			current.started = true
@@ -270,13 +298,14 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 			current.status = previous.status
 		}
 		if current.status != "" && current.status != previous.status {
-			if err := r.publish(ctx, "session.updated", id, map[string]any{"status": current.status}); err != nil {
+			if err := r.publish(ctx, outpost.SessionUpdated, id, map[string]any{"status": current.status}); err != nil {
 				return err
 			}
 		}
 		next[id] = current
 	}
 	r.sessions = next
+	r.previousLive = nil
 	return nil
 }
 
@@ -342,10 +371,10 @@ func sortedSessionIDs(sessions map[string]session) []string {
 
 func status(value string) string {
 	switch value {
-	case "working", "idle", "blocked":
+	case outpost.StatusWorking, outpost.StatusIdle, outpost.StatusBlocked:
 		return value
-	case "done":
-		return "idle"
+	case outpost.StatusDone:
+		return outpost.StatusIdle
 	default:
 		return ""
 	}
@@ -364,7 +393,7 @@ func (r *runner) execute(ctx context.Context, command Command) error {
 	if command.Enc != "" {
 		return nil
 	}
-	if command.Type != "command.message" && command.Type != "command.interrupt" {
+	if command.Type != outpost.CommandMessage && command.Type != outpost.CommandInterrupt {
 		return nil
 	}
 	owned, exists := r.sessions[command.SessionID]
@@ -372,7 +401,7 @@ func (r *runner) execute(ctx context.Context, command Command) error {
 		return nil
 	}
 	var text string
-	if command.Type == "command.message" {
+	if command.Type == outpost.CommandMessage {
 		var ok bool
 		text, ok = command.Payload["text"].(string)
 		if !ok || strings.TrimSpace(text) == "" {
@@ -395,7 +424,7 @@ func (r *runner) execute(ctx context.Context, command Command) error {
 	if live.PaneID != target.PaneID || live.Agent != target.Agent || live.TerminalID != target.TerminalID || id != command.SessionID {
 		return fmt.Errorf("pane %q no longer identifies session %q", target.PaneID, command.SessionID)
 	}
-	if command.Type == "command.message" {
+	if command.Type == outpost.CommandMessage {
 		if err := r.adapter.source.Prompt(ctx, target.PaneID, text); err != nil {
 			return fmt.Errorf("prompt pane %q: %w", target.PaneID, err)
 		}
