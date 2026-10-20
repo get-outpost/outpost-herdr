@@ -384,69 +384,6 @@ func TestTailClaudeAssistantOnlyIncludingMissingTranscriptFallback(t *testing.T)
 	}
 }
 
-func TestTailFallbackAdmissionNativeRaceAndConservativeEcho(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "appears-later.jsonl")
-	agent := tailAgent(path, "omp")
-	sink, store := newTailSink(), newTailStore()
-	worker := newTailWorker(t, sink, store)
-	at := time.Now().UTC()
-	delivery := deliveredMessage{agent: agent, commandID: "same-command-id", text: "repeatable prompt", at: at}
-	if err := worker.delivered(context.Background(), delivery); err != nil {
-		t.Fatal(err)
-	}
-	if err := worker.delivered(context.Background(), delivery); err != nil {
-		t.Fatal(err)
-	}
-	if len(sink.messages()) != 1 {
-		t.Fatal("admitted command fallback was not deduplicated")
-	}
-	session := tailSessionFor(t, worker, agent)
-	checkpoint, _ := store.Transcript(session.id)
-	if checkpoint.Initialized || len(checkpoint.Fallbacks) != 1 {
-		t.Fatal("fallback prematurely initialized transcript or lost dedup metadata")
-	}
-	// Shared ID + text + plausible timestamp identifies the command echo. An
-	// unrelated identical turn must survive, including after that echo is consumed.
-	tailWrite(t, path, tailOMPLine("same-command-id", "user", delivery.text, at)+tailOMPLine("unrelated-id", "user", delivery.text, at)+tailOMPLine("answer", "assistant", "reply", at))
-	tailScan(t, worker, session)
-	if got := tailTexts(sink); !reflect.DeepEqual(got, []string{delivery.text, delivery.text, "reply"}) {
-		t.Fatalf("fallback/native merge = %v", got)
-	}
-	if err := worker.delivered(context.Background(), deliveredMessage{agent: agent, commandID: "native-now-present", text: "not a fallback", at: at}); err != nil {
-		t.Fatal(err)
-	}
-	if len(sink.messages()) != 3 {
-		t.Fatal("available native transcript also emitted a fallback")
-	}
-}
-
-func TestTailFallbackDoesNotSuppressUnrelatedHistoricalOrUntimedMessages(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		at       time.Time
-		nativeID string
-	}{
-		{"historical", time.Now().Add(-time.Hour), "command"},
-		{"untimed", time.Time{}, "command"},
-		{"unrelated", time.Now(), "another-native-id"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "later.jsonl")
-			agent := tailAgent(path, "omp")
-			sink := newTailSink()
-			worker := newTailWorker(t, sink, newTailStore())
-			if err := worker.delivered(context.Background(), deliveredMessage{agent: agent, commandID: "command", text: "same text", at: time.Now()}); err != nil {
-				t.Fatal(err)
-			}
-			tailWrite(t, path, tailOMPLine(test.nativeID, "user", "same text", test.at))
-			tailScan(t, worker, tailSessionFor(t, worker, agent))
-			if len(sink.messages()) != 2 {
-				t.Fatal("ambiguous matching text suppressed a valid turn")
-			}
-		})
-	}
-}
-
 func TestManagerCallbacksNeverWaitForWorkerStoreAndCloseFinalScan(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "asynchronous.jsonl")
 	tailWrite(t, path, tailOMPLine("first", "assistant", "first", time.Time{}))

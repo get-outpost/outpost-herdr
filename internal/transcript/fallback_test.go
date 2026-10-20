@@ -2,7 +2,6 @@ package transcript
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,8 +18,7 @@ func TestTailFallbackCheckpointSurvivesCleanRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(t.TempDir(), "not-created-yet.jsonl")
-	agent := tailAgent(path, "omp")
+	agent := tailAgent("", "omp")
 	at := time.Now().UTC()
 	delivery := deliveredMessage{agent: agent, commandID: "durable-command", text: "durable fallback", at: at}
 	firstSink := newTailSink()
@@ -42,11 +40,6 @@ func TestTailFallbackCheckpointSurvivesCleanRestart(t *testing.T) {
 	}
 	if len(secondSink.messages()) != 0 {
 		t.Fatal("restart reposted the admitted command fallback")
-	}
-	tailWrite(t, path, tailOMPLine(delivery.commandID, "user", delivery.text, at)+tailOMPLine("durable-answer", "assistant", "after restart", at))
-	tailScan(t, second, tailSessionFor(t, second, agent))
-	if got := tailTexts(secondSink); !reflect.DeepEqual(got, []string{"after restart"}) {
-		t.Fatalf("restart echo merge = %v", got)
 	}
 }
 

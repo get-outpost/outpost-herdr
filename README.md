@@ -194,14 +194,15 @@ through `agent.prompt`. Publishing it here too would duplicate that turn. If the
 hook is absent, the app's optimistic Sent bubble still covers phone-sent text;
 terminal user turns are not supplied by this daemon for Claude.
 
-For other providers, when no supported native transcript resolves, an admitted
-`command.message` produces a user `message.created` with a stable command-based
-ID. Rejected prompts produce no fallback. There is no synthetic assistant reply.
-If a transcript appears later, an echo is suppressed only with positive entry /
-command identity; matching text alone is not enough to discard a real repeated
-turn. Formats with unrelated native IDs can therefore show both the fallback
-and later backfilled user text. Ordinary transcript restart/rotation dedupe does
-not rely on text-only guessing.
+For other providers, an admitted `command.message` produces a user
+`message.created` with a stable command-based ID only when the agent declares
+**no supported native transcript source**. An OMP/Pi path reference or a Codex
+session ID reserves native ownership even before its file exists or the tailer
+attaches. A temporarily missing/unreadable file must not trigger a fallback that
+duplicates the later native turn. Rejected prompts produce no fallback; there is
+no synthetic assistant reply. If a previously unsupported source becomes
+readable later, an echo is suppressed only with positive entry / command
+identity; matching text alone never discards a real repeated turn.
 
 ## JSON-lines dry run
 

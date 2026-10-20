@@ -411,8 +411,10 @@ func (w *tailWorker) delivered(ctx context.Context, delivery deliveredMessage) e
 	if err != nil {
 		return err
 	}
-	// Claude's hook owns every user bubble, including when no file is available.
-	if available || provider(delivery.agent) == outpost.ProviderClaude {
+	// A declared native source may precede creation of its file (notably OMP).
+	// Attachment/readability is not evidence that the agent has no transcript.
+	// Claude's hook owns every user bubble, even without a declared source.
+	if available || declaresTranscriptSource(delivery.agent) || provider(delivery.agent) == outpost.ProviderClaude {
 		return nil
 	}
 	messageID := "herdr-command:" + digest(fmt.Sprintf("%d:%s%s", len(id), id, delivery.commandID))
@@ -431,6 +433,21 @@ func (w *tailWorker) delivered(ctx context.Context, delivery deliveredMessage) e
 }
 
 func provider(agent herdr.Agent) string { return strings.ToLower(strings.TrimSpace(agent.Agent)) }
+
+func declaresTranscriptSource(agent herdr.Agent) bool {
+	ref := agent.AgentSession
+	if ref == nil || strings.TrimSpace(ref.Value) == "" {
+		return false
+	}
+	switch provider(agent) {
+	case outpost.ProviderOMP, outpost.ProviderPi:
+		return ref.Kind == "path"
+	case outpost.ProviderCodex:
+		return ref.Kind == "id" && safeNativeID(ref.Value)
+	default:
+		return false
+	}
+}
 
 // scan drains an already-open descriptor before switching a renamed/replaced
 // path. Each read is limited to the stat size captured at scan entry, so a busy
