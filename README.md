@@ -206,6 +206,29 @@ head initialization, fresh command execution, stale-command logging/drop,
 event-only cursor persistence, clean signal flushing, restart without command
 replay, and ended reconciliation for an agent that exited while offline.
 
+### Live E2E evidence
+
+Completed with a disposable OMP agent on the inexpensive GPT-6 Luna model,
+the local relay, and the SwiftUI client. The daemon observed only its own pane
+using an isolated namespace/state directory. Credentials came through the
+environment from a private file; the saved login was not modified.
+
+| Scenario | Observed evidence |
+| --- | --- |
+| Metadata | SwiftUI showed provider `omp`, the canonical scratch cwd, the expected title, and Connected/Idle |
+| Remote message | Command `328` produced working `329`, idle `330`, the expected agent reply, and exactly one marker write |
+| Working interrupt | Sleep command `331` entered working `332`; interrupt `333` produced idle `334` in the same second. The pane showed `Command aborted`, with no sleep-completion reply |
+| Blocked state | Ask command `335` produced blocked `337`; SwiftUI captured the orange list chip and Connected/Blocked detail |
+| Restart with live agent | Cursor `337` resumed into start `338` / blocked `339`; native user-turn count stayed at three and the marker was unchanged |
+| Pane exit | Answered the scratch question locally, observed idle `341`, then closed only that pane: ended `342`, status `done`, with `ended_at` set |
+| Restart after exit | Resumed cursor `342`, empty live set, unchanged end timestamp, no new scratch events or replayed commands; independently confirmed by the orchestrator |
+
+The post-interrupt idle transition was confirmed in the event stream; that
+specific UI screenshot was missed during a client relaunch. All test daemons,
+the monitor connection, owned scratch files/state and temporary binaries were
+removed. No service was installed, no existing pane received test input, and
+the runtime log contained no plugin token.
+
 Tests use fake Herdr sockets, in-memory agent sources and HTTP/WebSocket relay
 servers. Timer tests use `testing/synctest`. Live E2E must use its **own scratch
 pane/agent** and an isolated namespace/state directory; never send test input to
