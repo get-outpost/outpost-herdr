@@ -10,9 +10,13 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/get-outpost/outpost-herdr/internal/herdr"
 )
+
+// DefaultSessionGracePeriod allows native integrations to attach a session ref.
+const DefaultSessionGracePeriod = 10 * time.Second
 
 // Adapter translates authoritative herdr snapshots and executes commands for
 // sessions currently present in those snapshots. Its state is in memory only.
@@ -21,13 +25,18 @@ type Adapter struct {
 	sink      Sink
 	namespace string
 	running   atomic.Bool
+
+	// SessionGracePeriod delays agents without a native id/path reference until
+	// this duration elapses or a known status arrives. Set before Run; zero
+	// disables the delay. New defaults to ten seconds.
+	SessionGracePeriod time.Duration
 }
 
 // New constructs an adapter. namespace must be a stable, nonblank identifier for
 // this herdr installation, so fallback identities do not collide across devices.
 // Invalid configuration is reported by Run before any I/O.
 func New(source herdr.Source, sink Sink, namespace string) *Adapter {
-	return &Adapter{source: source, sink: sink, namespace: namespace}
+	return &Adapter{source: source, sink: sink, namespace: namespace, SessionGracePeriod: DefaultSessionGracePeriod}
 }
 
 // SessionID preserves a nonblank agent_session kind=id value byte-for-byte,
@@ -74,8 +83,10 @@ type snapshotRequest struct {
 }
 
 type session struct {
-	agents []herdr.Agent
-	status string
+	agents     []herdr.Agent
+	status     string
+	started    bool
+	startAfter time.Time
 }
 
 type runner struct {
@@ -96,6 +107,9 @@ func (a *Adapter) Run(ctx context.Context) error {
 	}
 	if a.source == nil || a.sink == nil {
 		return errors.New("adapter requires a source and a sink")
+	}
+	if a.SessionGracePeriod < 0 {
+		return errors.New("session grace period must not be negative")
 	}
 	if !a.running.CompareAndSwap(false, true) {
 		return errors.New("adapter is already running")
@@ -129,6 +143,30 @@ func (a *Adapter) Run(ctx context.Context) error {
 	}()
 
 	r := runner{adapter: a, sessions: make(map[string]session)}
+	var latest herdr.Snapshot
+	var startTimer *time.Timer
+	var starts <-chan time.Time
+	defer func() {
+		if startTimer != nil {
+			startTimer.Stop()
+		}
+	}()
+	resetStartTimer := func() {
+		deadline := r.nextStart()
+		if deadline.IsZero() {
+			if startTimer != nil {
+				startTimer.Stop()
+			}
+			starts = nil
+			return
+		}
+		if startTimer == nil {
+			startTimer = time.NewTimer(time.Until(deadline))
+		} else {
+			startTimer.Reset(time.Until(deadline))
+		}
+		starts = startTimer.C
+	}
 	var commands <-chan Command
 	initialized := false
 	for {
@@ -143,10 +181,17 @@ func (a *Adapter) Run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			latest = request.snapshot
+			resetStartTimer()
 			if !initialized {
 				commands = a.sink.Commands()
 				initialized = true
 			}
+		case <-starts:
+			if err := r.reconcile(runCtx, latest); err != nil {
+				return err
+			}
+			resetStartTimer()
 		case command, ok := <-commands:
 			if !ok {
 				commands = nil
@@ -161,6 +206,7 @@ func (a *Adapter) Run(ctx context.Context) error {
 
 func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 	next := make(map[string]session)
+	now := time.Now()
 	for _, agent := range snapshot.Agents {
 		if strings.TrimSpace(agent.Agent) == "" {
 			continue
@@ -184,9 +230,15 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 	}
 
 	for _, id := range sortedSessionIDs(r.sessions) {
-		if _, exists := next[id]; !exists {
-			if err := r.publish(ctx, "session.ended", id, nil); err != nil {
-				return err
+		if previous := r.sessions[id]; previous.started {
+			if _, exists := next[id]; !exists {
+				kind := "session.ended"
+				if promotedToNative(previous, next) {
+					kind = "session.deleted"
+				}
+				if err := r.publish(ctx, kind, id, nil); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -194,7 +246,15 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 		current := next[id]
 		previous, exists := r.sessions[id]
 		agent := current.agents[0]
+		current.started, current.startAfter = previous.started, previous.startAfter
 		if !exists {
+			current.startAfter = now.Add(r.adapter.SessionGracePeriod)
+		}
+		if !current.started && !hasSessionRef(agent) && status(agent.AgentStatus) == "" && now.Before(current.startAfter) {
+			next[id] = current
+			continue
+		}
+		if !current.started {
 			payload := map[string]any{
 				"provider": agent.Agent,
 				"cwd":      firstNonblank(agent.ForegroundCwd, agent.Cwd),
@@ -203,6 +263,7 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 			if err := r.publish(ctx, "session.started", id, payload); err != nil {
 				return err
 			}
+			current.started = true
 		}
 		current.status = status(agent.AgentStatus)
 		if current.status == "" {
@@ -217,6 +278,50 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 	}
 	r.sessions = next
 	return nil
+}
+
+func hasSessionRef(agent herdr.Agent) bool {
+	ref := agent.AgentSession
+	return ref != nil && (ref.Kind == "id" || ref.Kind == "path") && strings.TrimSpace(ref.Value) != ""
+}
+
+func hasNativeID(agent herdr.Agent) bool {
+	return hasSessionRef(agent) && agent.AgentSession.Kind == "id"
+}
+
+// Promotion must follow the same local occupant, not just reuse its pane ID.
+// A terminal ID survives pane moves; without one, the pane is our only locator.
+func promotedToNative(previous session, next map[string]session) bool {
+	for _, before := range previous.agents {
+		if hasNativeID(before) {
+			continue
+		}
+		for _, current := range next {
+			for _, after := range current.agents {
+				if !hasNativeID(after) || before.Agent != after.Agent {
+					continue
+				}
+				if before.TerminalID != "" {
+					if before.TerminalID == after.TerminalID {
+						return true
+					}
+				} else if before.PaneID == after.PaneID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (r *runner) nextStart() time.Time {
+	var earliest time.Time
+	for _, current := range r.sessions {
+		if !current.started && (earliest.IsZero() || current.startAfter.Before(earliest)) {
+			earliest = current.startAfter
+		}
+	}
+	return earliest
 }
 
 func (r *runner) publish(ctx context.Context, kind, id string, payload map[string]any) error {
@@ -263,7 +368,7 @@ func (r *runner) execute(ctx context.Context, command Command) error {
 		return nil
 	}
 	owned, exists := r.sessions[command.SessionID]
-	if !exists {
+	if !exists || !owned.started {
 		return nil
 	}
 	var text string

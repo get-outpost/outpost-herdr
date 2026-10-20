@@ -141,9 +141,14 @@ func runAdapter(t *testing.T, source *fakeSource, sink Sink) (<-chan error, cont
 
 func runWithSource(t *testing.T, source herdr.Source, lifecycle *fakeSource, sink Sink) (<-chan error, context.CancelFunc) {
 	t.Helper()
+	return runConfiguredAdapter(t, New(source, sink, "test-installation"), lifecycle)
+}
+
+func runConfiguredAdapter(t *testing.T, adapter *Adapter, lifecycle *fakeSource) (<-chan error, context.CancelFunc) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- New(source, sink, "test-installation").Run(ctx) }()
+	go func() { done <- adapter.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {

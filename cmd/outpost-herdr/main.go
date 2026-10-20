@@ -29,12 +29,16 @@ func run() error {
 	namespace := flag.String("namespace", "", "stable host/session identity for fallback session IDs (default: hostname:socket)")
 	commands := flag.Bool("commands", false, "execute command JSON lines from stdin; disabled by default")
 	snapshot := flag.Bool("snapshot", false, "print one read-only Herdr snapshot and exit")
+	sessionGrace := flag.Duration("session-grace", adapter.DefaultSessionGracePeriod, "wait for an agent session reference or known status before starting a fallback session (0 disables)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
 	if *snapshot && *commands {
 		return errors.New("--snapshot cannot be combined with --commands")
+	}
+	if *sessionGrace < 0 {
+		return errors.New("--session-grace must not be negative")
 	}
 	if *socket == "" {
 		var err error
@@ -69,7 +73,9 @@ func run() error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	finished := make(chan error, 1)
-	go func() { finished <- adapter.New(client, sink, *namespace).Run(ctx) }()
+	bridge := adapter.New(client, sink, *namespace)
+	bridge.SessionGracePeriod = *sessionGrace
+	go func() { finished <- bridge.Run(ctx) }()
 	select {
 	case err := <-finished:
 		if errors.Is(err, context.Canceled) {
