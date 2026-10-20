@@ -277,6 +277,29 @@ Phase-three verification passed the full race suite, vet and a CLI build. An
 isolated executable run checked last-20 backfill, partial-line completion,
 tool-preamble filtering, stable IDs, copied-file replacement, same-path
 truncation, and a clean restart with unchanged conversation/start counts.
+An additional executable race smoke admitted a prompt while its declared native
+file was still absent, observed no premature fallback, then created the file and
+received exactly one native user message and one final assistant message.
+
+### Phase-three live E2E evidence
+
+The clean run used `1bf6c6a`, a fresh disposable OMP agent on GPT-6 Luna, the
+local server and the SwiftUI client. The daemon was pane-scoped with isolated
+state; credentials stayed in the environment and the saved login was untouched.
+
+| Scenario | Observed evidence |
+| --- | --- |
+| Lazy transcript creation | The native path was declared while its file was absent. One command (`422`) produced working (`423`), one native user message (`424`), one native assistant message (`425`), then idle (`426`); no command-based fallback |
+| Conversation in app | The SwiftUI observer confirmed one Session Started card, one user bubble, one assistant `OUTPOST_PHASE3_ASSISTANT_OK` bubble, zero Sent bubbles, and Connected/Idle |
+| Restart with live agent | Clean stop, same pane/namespace/state; first new event was metadata/status `session.updated` (`427`), not another start. Totals stayed at one start, one command and two messages; checkpoint offset and both message IDs were unchanged |
+| App after restart | A direct Device Hub screenshot and accessibility hierarchy confirmed the same single start card, one user bubble and one assistant marker, zero Sent bubbles, and Connected/Idle; no remote command, rebuild or reinstall was used |
+
+The orchestrator independently confirmed that `427` was the only scratch event
+after `426` before cleanup. Closing only the owned scratch pane emitted
+`session.ended` (`428`). Both daemon stops exited cleanly; the monitor and owned
+capture session were closed, and the scratch directory/state and temporary
+binary were removed. The private credential file and saved login were untouched,
+and the daemon log contained no plugin token.
 
 ### Phase-two live E2E evidence (before restart polish)
 
