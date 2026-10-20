@@ -34,9 +34,14 @@ type Adapter struct {
 	SessionGracePeriod time.Duration
 
 	// PreviouslyLive is the persisted live session set captured before startup.
-	// The first snapshot ends absent IDs and re-announces current agents.
+	// The first snapshot ends absent IDs and updates current agent metadata.
 	// Set before Run; IDs should be unique and nonempty.
 	PreviouslyLive []string
+
+	// MessageDelivered observes command.message only after Prompt is admitted.
+	// The daemon uses it for native-transcript-aware conversation fallback.
+	// It must not block on disk/network I/O; set before Run.
+	MessageDelivered func(context.Context, herdr.Agent, Command) error
 }
 
 // New constructs an adapter. namespace must be a stable, nonblank identifier for
@@ -282,22 +287,30 @@ func (r *runner) reconcile(ctx context.Context, snapshot herdr.Snapshot) error {
 			next[id] = current
 			continue
 		}
-		if !current.started {
-			payload := map[string]any{
-				"provider": agent.Agent,
-				"cwd":      firstNonblank(agent.ForegroundCwd, agent.Cwd),
-				"title":    firstNonblank(agent.Name, agent.Title, agent.TerminalTitleStripped, agent.TerminalTitle, agent.DisplayAgent, agent.Agent),
-			}
-			if err := r.publish(ctx, outpost.SessionStarted, id, payload); err != nil {
-				return err
-			}
-			current.started = true
-		}
 		current.status = status(agent.AgentStatus)
 		if current.status == "" {
 			current.status = previous.status
 		}
-		if current.status != "" && current.status != previous.status {
+		if !current.started {
+			payload := map[string]any{
+				"cwd":   firstNonblank(agent.ForegroundCwd, agent.Cwd),
+				"title": firstNonblank(agent.Name, agent.Title, agent.TerminalTitleStripped, agent.TerminalTitle, agent.DisplayAgent, agent.Agent),
+			}
+			kind := outpost.SessionStarted
+			if previouslyPublished {
+				kind = outpost.SessionUpdated
+				if current.status != "" {
+					payload["status"] = current.status
+				}
+			} else {
+				payload["provider"] = agent.Agent
+			}
+			if err := r.publish(ctx, kind, id, payload); err != nil {
+				return err
+			}
+			current.started = true
+		}
+		if !previouslyPublished && current.status != "" && current.status != previous.status {
 			if err := r.publish(ctx, outpost.SessionUpdated, id, map[string]any{"status": current.status}); err != nil {
 				return err
 			}
@@ -427,6 +440,11 @@ func (r *runner) execute(ctx context.Context, command Command) error {
 	if command.Type == outpost.CommandMessage {
 		if err := r.adapter.source.Prompt(ctx, target.PaneID, text); err != nil {
 			return fmt.Errorf("prompt pane %q: %w", target.PaneID, err)
+		}
+		if r.adapter.MessageDelivered != nil {
+			if err := r.adapter.MessageDelivered(ctx, live, command); err != nil {
+				return fmt.Errorf("record admitted message for pane %q: %w", target.PaneID, err)
+			}
 		}
 		return nil
 	}

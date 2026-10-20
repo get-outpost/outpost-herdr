@@ -138,15 +138,15 @@ func TestSDKCommandsReachRealAdapterAndRestartReconcilesMissingSessions(t *testi
 	source := newSource(s, state)
 	done, cancel := runRealAdapter(t, source, previous)
 	source.apply(t, localAgent())
-	ended, started := receive(t, server.posts), receive(t, server.posts)
+	ended, resumed := receive(t, server.posts), receive(t, server.posts)
 	if ended.Type != outpost.SessionEnded || ended.SessionID != "gone" {
 		t.Fatalf("missing restart ended event: %#v", ended)
 	}
-	if started.Type != outpost.SessionStarted || started.SessionID != "native" {
-		t.Fatalf("live session not reannounced: %#v", started)
+	if resumed.Type != outpost.SessionUpdated || resumed.SessionID != "native" {
+		t.Fatalf("live session restart produced a duplicate start: %#v", resumed)
 	}
-	if !strings.Contains(string(started.Payload), `"provider":"omp"`) {
-		t.Fatalf("provider not preserved: %s", started.Payload)
+	if !strings.Contains(string(resumed.Payload), `"status":"idle"`) || !strings.Contains(string(resumed.Payload), `"title":"Relay integration"`) || !strings.Contains(string(resumed.Payload), `"cwd":"/project"`) {
+		t.Fatalf("restart did not reconcile current metadata/status: %s", resumed.Payload)
 	}
 
 	sendFrame(t, conn, command(21, outpost.CommandMessage, "native"))
