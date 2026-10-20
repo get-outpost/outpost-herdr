@@ -1,184 +1,212 @@
 # Outpost Herdr
 
-Go adapter connecting Herdr's agent lifecycle and terminal controls to Outpost's
-event vocabulary. Phase 1 implements the **Herdr side only**, without importing
-Outpost Server internals or depending on the client SDK being extracted there.
+A Go daemon translating local Herdr agents into Outpost sessions and routing
+phone messages and interrupts back to their terminal harnesses. Uses the public
+[`outpost-go v0.1.0`](https://github.com/get-outpost/outpost-go) SDK; no server
+internal imports or local module replacements.
 
 ## What works
 
-- Bounded Unix-socket requests and typed agent/pane/native-session models.
-- Event subscription, reconnect, topology-aware status coverage, and authoritative
-  re-sync after subscription. Transport failure never means every session ended.
-- `session.started`, `session.updated`, and `session.ended`; `done` maps to `idle`.
-  Late fallback-to-native-ID promotion emits `session.deleted` for the fallback.
-- Native session IDs passed through unchanged, allowing Claude's hook and this
-  adapter to publish to one Outpost session. Stable namespaced hashed fallbacks
-  for session paths and terminal/pane identities.
-- `command.message` through `agent.prompt`; `command.interrupt` through one Escape.
-  Commands target only currently mapped local sessions and re-check live identity
-  before input. No command retries after ambiguous transport failure.
-- A context-aware `Sink` boundary, an in-memory fake, and a runnable JSON-lines
-  bridge. No real Herdr instance is needed for the tests.
+- Bounded Herdr Unix-socket requests, topology-aware event subscriptions,
+  reconnect and authoritative post-subscription re-sync.
+- Native session IDs shared with harness hooks, stable namespaced fallback IDs,
+  startup grace, and fallback tombstones on late native-ID promotion.
+- `session.started`, semantic status updates, and `session.ended` on exit.
+  Herdr `done` maps to `idle`; unknown state never fabricates idle.
+- SDK HTTP publication through a bounded FIFO queue, transient-failure retries,
+  a resumable command stream, and deadline-bounded shutdown flushing.
+- Durable command cursor and published-live session set, including exits missed
+  while the daemon was stopped.
+- `command.message` through Herdr's native prompt handling;
+  `command.interrupt` through one Escape. Each command revalidates live identity.
+- Shared `outpost login` credentials and a separate JSON-lines dry-run mode.
 
-`command.approve` stays with the Claude hook. No terminal transcript streaming,
-structured tool events, HTTP/WebSocket relay connection, durable command cursor,
-service installer, or Windows named-pipe transport is provided in this phase.
-The JSON-lines command input is an explicit local integration boundary, not a
-claim that the phone already connects through this executable.
+Approval commands remain with the native Claude hook. No terminal transcript
+streaming, structured tool telemetry, Windows named pipes, or service
+installation is included.
 
-## Run
+## Run the daemon
 
-Requires Go 1.27 and a running Herdr session. Protocol discovery was performed on
-Herdr 0.9.5 (private protocol 22). No third-party Go dependencies.
+Requires Go 1.27, a running Herdr session, an Outpost server, and a **plugin**
+device login. Herdr protocol discovery was performed on 0.9.5/private protocol 22.
 
 ```sh
 go build -o /tmp/outpost-herdr ./cmd/outpost-herdr
 
-# Read-only: one typed Herdr snapshot (agents and panes), then exit.
-/tmp/outpost-herdr --snapshot
-
-# Read-only: watch and print Outpost events, one JSON object per line.
-/tmp/outpost-herdr --namespace my-mac:default
+# Uses the same saved outpost login as the machine's Claude hook.
+/tmp/outpost-herdr run --namespace my-machine:default
 ```
 
-The default socket follows `HERDR_SOCKET_PATH`, then `HERDR_SESSION` under
-`$XDG_CONFIG_HOME/herdr` (falling back to `~/.config/herdr`).
-`--socket /path/to/herdr.sock` overrides discovery. Select named sessions with
-`HERDR_SESSION=mobile` after unsetting any inherited `HERDR_SOCKET_PATH`.
-Keep `--namespace` stable and unique for
-each machine/Herdr session; the default is `hostname:socket-path`. It affects
-fallback IDs only, never native IDs. Stop with SIGINT or SIGTERM.
+The SDK URL and token resolve independently: nonempty `OUTPOST_URL` and
+`OUTPOST_TOKEN` override the corresponding saved login field. The login file is
+`$XDG_CONFIG_HOME/outpost/config.json`, falling back to
+`~/.config/outpost/config.json`, with JSON keys `url` and `token`. If both values
+are supplied through the environment, the login file is not accessed. The daemon
+never writes that file or logs the token. Use HTTPS outside localhost.
 
-Agents without a nonempty native `id` or `path` session reference wait up to
-10 seconds before a fallback `session.started`. The first known status
-(`working`, `idle`, `blocked`, or `done`) releases that wait early, including
-when it is already known in the first snapshot. A native reference publishes
-immediately. Use `--session-grace 20s` to change the duration, or
-`--session-grace 0` to disable it; negative durations are rejected. The adapter
-API exposes the same setting as `Adapter.SessionGracePeriod` (set before `Run`).
-Repeated snapshots and pane moves do not restart the grace clock. Agents that
-disappear during grace produce no lifecycle events.
+Recommended deployment: **one plugin device per machine**, shared by the Claude
+hook and Herdr daemon through the same login config. Do not create separate
+per-adapter logins. Never commit tokens or put them in service manifests.
 
-If a native ID arrives after a fallback was published for the same local agent,
-the adapter emits `session.deleted` for that fallback **before** starting the
-native session. The tombstone hides the duplicate from clients by default.
-Actual exits and unrelated replacements still emit `session.ended`.
+The Herdr socket follows `HERDR_SOCKET_PATH`, then `HERDR_SESSION` under
+`$XDG_CONFIG_HOME/herdr` (fallback `~/.config/herdr`). An explicit `--socket`
+overrides discovery. Unset an inherited `HERDR_SOCKET_PATH` before selecting a
+different named session with `HERDR_SESSION`.
 
-### Opt-in commands
+Keep `--namespace` stable and unique per machine, Herdr session and observation
+scope. It defaults to `hostname:socket-path`. Run **only one daemon per
+namespace**. Use a new namespace when changing accounts or relay deployments;
+a cursor is meaningful only within its original account log.
 
-`--commands` enables command JSON lines on stdin while event JSON lines continue
-on stdout. Without that flag stdin is ignored and no input is sent to agents.
-Only use session IDs from the bridge's currently emitted events; avoid replaying
-old command input. For intentional control of an agent you own:
+| Flag | Default | Behavior |
+| --- | --- | --- |
+| `--socket` | Native Herdr discovery | Explicit Unix socket |
+| `--namespace` | Hostname and socket | Fallback identity and durable state scope |
+| `--pane` | All agents | Observe only this pane; use a distinct namespace |
+| `--session-grace` | `10s` | Delay unpublished agents without a native session reference; `0` disables |
+| `--queue-size` | `256` | Maximum queued publications; overflow stops the daemon rather than blocking the watcher |
+| `--command-max-age` | `2m` | Drop older message/interrupt commands based on envelope `ts` |
+| `--flush-timeout` | `5s` | Maximum publication drain on SIGINT/SIGTERM |
+
+Queue size, maximum command age and flush timeout must be positive; grace cannot
+be negative. SDK requests have their own bounded request budget. SIGINT/SIGTERM
+stop observation and command intake, then drain queued publications under a fresh
+flush deadline. A deadline/fatal error is reported as a nonzero exit.
+
+## Publication and command safety
+
+`Sink.Publish` admits an immutable event to a bounded queue without waiting for
+the relay. One worker publishes in order through SDK `PostEvent`, retrying
+network/server failures with bounded exponential backoff. HTTP 4xx responses are
+logged and dropped, except **401**, which stops the daemon with an authentication
+error. Queue overflow and durable-state write failures also stop it. There is no
+unbounded memory queue or promise of delivery after a crash.
+
+The command stream starts at `ListSessions().as_of_seq` on the first run, so
+historical commands are never executed. The head is persisted before connecting.
+Restarts resume from the durable cursor. Initial stream connection failures are
+retried with backoff; established-stream reconnect/deduplication comes from the
+SDK. HTTP 401/403 on stream handshakes are terminal.
+
+Only event-frame sequences advance the durable cursor. `ready.head_seq` and ack
+sequences do not. Unsupported, encrypted, foreign-session and over-age commands
+are ignored; stale-command drops are logged without their payloads.
+
+**Command delivery is at-most-once across daemon restarts, not exactly-once.**
+The cursor is durably saved **before** a command is handed to the adapter. A crash
+between those steps can lose that command, but will not replay a potentially
+already executed prompt or interrupt. There are no automatic command retries.
+Input queue admission does not prove execution or cancellation.
+
+Owned means **currently mapped to a live local agent**, not matching server
+`owner_device_id`. A hook-first Claude session must still accept the daemon's
+message/interrupt commands. Before input the adapter performs another
+`agent.get` identity check. The public Herdr API has no atomic expected-session
+guard, so a small read/input-queue race remains.
+
+Escape interrupts Claude, Codex, Pi and OMP under their default bindings. Other
+kinds use the same best-effort baseline; Escape may dismiss/decline a dialog or
+do nothing. User-remapped bindings are not detected. Native approval commands
+are deliberately not interpreted here.
+
+## Durable lifecycle recovery
+
+State lives at `$XDG_STATE_HOME/outpost-herdr/<sha256(namespace)>.json`, falling
+back to `~/.local/state/outpost-herdr/`. The private directory is mode `0700`,
+files `0600`. Atomic replacement stores the cursor and successfully published
+live-session IDs together. Corrupt state is fatal, not silently reset to zero.
+State contains session IDs/cursors in plaintext, but no token or event payloads.
+
+Starts and updates accepted by the server add a live ID; accepted ends and
+tombstones remove it. After the first authoritative Herdr snapshot on startup,
+previously live IDs absent locally receive `session.ended`. Current agents get
+`session.started` again. Previously published fallbacks are re-announced without
+another grace period, preserving subsequent promotion/exit tracking.
+
+Agents without a nonempty native `id` or `path` reference wait until grace
+expires or their first known status (`working`, `idle`, `blocked`, `done`),
+whichever comes first. A known initial status releases immediately. A timer
+expires grace even without another event; refreshes and pane moves retain the
+deadline. Agents disappearing before publication emit nothing.
+
+A late native ID for the same local agent causes `session.deleted` for the
+published fallback **before** the native start, hiding the duplicate in default
+client listings. Ordinary exits and unrelated replacements still end normally.
+Native IDs pass through unchanged, so Claude's hook and daemon share one session.
+Fallback hashing and promotion matching are specified in
+[the protocol investigation](docs/herdr-protocol.md).
+
+Canonical provider names are Herdr kinds (`claude`, `codex`, `pi`, `omp`,
+`opencode`); unknown kinds pass through unchanged. Protocol vocabulary/status
+constants come from the SDK. There is no server alias/merge API.
+
+## JSON-lines dry run
 
 ```sh
-/tmp/outpost-herdr --namespace my-mac:default --commands
+# Read-only typed Herdr snapshot, then exit.
+/tmp/outpost-herdr dry-run --snapshot
+
+# Read-only Outpost event JSON lines; no server, credentials or state file.
+/tmp/outpost-herdr dry-run --namespace my-machine:preview
 ```
 
-Then write a command on stdin, substituting that agent's actual session ID:
+Bare legacy invocations without a subcommand retain this dry-run behavior.
+Stdin is ignored unless `--commands` is explicitly passed. With that opt-in,
+stdin command JSON lines can intentionally control a locally mapped session:
 
 ```json
 {"id":"local-1","type":"command.message","session_id":"<actual-session-id>","payload":{"text":"Please run the tests"}}
 {"id":"local-2","type":"command.interrupt","session_id":"<actual-session-id>","payload":{}}
 ```
 
-Do not paste example input targeting someone else's agent. Escape interrupts
-Claude, Codex, Pi and OMP under their default keymaps; other agent kinds use the
-same best-effort baseline. It may dismiss or decline a dialog. User-remapped
-bindings are not detected. A successful response is input queue admission, not
-proof the agent has completed or stopped. State updates come from observation.
+Use IDs emitted by the current bridge, not an old command log. EOF leaves
+monitoring running. Bad command JSON, invalid actionable commands, execution and
+output failures stop it. Approval, encrypted and foreign commands are ignored.
+No stdin command input is used by `run`; it consumes the authenticated SDK
+stream instead.
 
-Bad command JSON, actionable invalid commands, execution failures and publish
-failures stop the bridge with a stderr diagnostic/nonzero exit. Unsupported,
-encrypted and foreign-session commands are ignored. EOF on stdin leaves
-monitoring running. No automatic mutation retry or durable deduplication is
-claimed. External integration must supply a non-replaying command stream.
+## Service examples
 
-## Packages
+Use an external supervised daemon per Herdr session. Herdr startup hooks are
+one-shot initialization, not daemon supervision; plugin panes consume a terminal.
+
+- [launchd LaunchAgent](docs/services/org.get-outpost.herdr.plist): edit the
+  absolute executable/log paths and unique namespace for the intended machine.
+  Create a user-writable log directory first; `/usr/local` paths are examples,
+  not a requirement. The example allows ten seconds for the default five-second
+  flush and throttles failure restarts.
+- [systemd user unit](docs/services/outpost-herdr.service): expects the binary in
+  `~/.local/bin`, uses `%H:default` as namespace, and sends logs to the journal.
+
+Both examples read the shared login file; neither embeds credentials. Validate
+and adapt them before registering them with your user service manager. **No
+service is installed by this repository or by running the daemon.** If increasing
+`--flush-timeout`, also increase the service manager's stop timeout.
+
+## Packages and verification
 
 | Package | Responsibility |
 | --- | --- |
-| `internal/herdr` | `Client`, socket discovery, typed models, request bounds, `Source.Watch` and authoritative snapshots |
-| `internal/adapter` | Snapshot reconciliation, `SessionID`, `Adapter.Run`, `Sink`, `Event`, `Command`, `MemorySink` |
-| `cmd/outpost-herdr` | Read-only snapshot/watch and opt-in stdin/stdout bridge |
-
-`Sink.Publish(context.Context, Event) error` publishes events.
-`Sink.Commands() <-chan Command` supplies commands (nil means read-only).
-`adapter.New(source, sink, namespace).Run(ctx)` owns reconciliation and command
-routing. `herdr.Source` permits fake snapshots and controls in tests.
-`MemorySink.Send(ctx, command)` queues a command and `Events()` returns a snapshot
-of emitted events. A future SDK-backed Sink can implement these contracts
-without depending on the server's internal packages.
-
-## Verification
+| `internal/herdr` | Socket transport, typed models, authoritative subscription recovery |
+| `internal/adapter` | Identity, grace/promotion, lifecycle reconciliation, live command revalidation, unchanged `Sink` and `MemorySink` |
+| `internal/relay` | SDK publication queue, command stream, durable dispatch safety, shutdown |
+| `internal/state` | Atomic namespace-scoped cursor and live-session storage |
+| `internal/config` | Environment-first shared login loading |
+| `cmd/outpost-herdr` | Daemon, scoped observation and JSON-lines dry run |
 
 ```sh
 go test -race ./...
 go vet ./...
+plutil -lint docs/services/org.get-outpost.herdr.plist
 ```
 
-Fake Unix servers test framing, deadlines, cancellation, subscription races,
-reconnect and re-sync. Adapter fakes cover identity, lifecycle and stale-target
-command safety. Live input testing must create its **own scratch pane and
-agent**; never send test input to existing panes.
+Phase-two unit verification passed the race suite, vet, a CLI build and plist
+validation. An isolated executable smoke run verified HTTP 503 retry, first-run
+head initialization, fresh command execution, stale-command logging/drop,
+event-only cursor persistence, clean signal flushing, restart without command
+replay, and ended reconciliation for an agent that exited while offline.
 
-Phase 1 verification passed `go test -race ./...`, `go vet ./...`, and a CLI build.
-The built bridge was exercised against an isolated fake Unix server: native-ID
-start, idle → working → idle, prompt submission, one `esc`, session end and clean
-SIGTERM exit. Separate CLI smoke checks confirmed stdin cannot control agents
-without `--commands` and malformed command JSON exits nonzero. Live
-`--snapshot` succeeded against Herdr 0.9.5/protocol 22; no live agent input was
-used for verification.
-
-Phase 1b added deterministic virtual-time tests (`testing/synctest`) for grace
-deadlines, reference/status arrival, pane moves, disappearance and promotion.
-Race tests, vet and the CLI build passed again. Isolated executable smoke runs
-observed native-only publication within grace, timer-driven fallback publication
-followed by delete-before-native-start, and early release on a known status.
-Negative CLI grace was rejected; no live agent input was used.
-
-## Deployment and integration decisions
-
-Use an **external daemon per Herdr session**, not an event hook pretending to be
-a daemon. Herdr startup hooks are one-shot, not supervised services; plugin panes
-can host long-lived programs but consume a terminal surface. A hybrid plugin
-installer/action is possible once its supervisor lifecycle is specified. See
-[the protocol investigation](docs/herdr-protocol.md) for framing, exact fallback
-hash inputs, observed schema differences, keybindings and primary sources.
-
-### Ownership and credentials
-
-For this adapter, **owned means currently mapped to a live local agent**.
-Do not filter commands by whether `owner_device_id` matches the daemon's device:
-a hook-first Claude session must still accept daemon message/interrupt commands,
-since the hook cannot execute them. Live `agent.get` identity revalidation remains
-mandatory before input; `command.approve` stays with the native hook.
-
-Recommended deployment: **one plugin device per machine**, shared by the Claude
-hook and Herdr daemon through the same `outpost login` config. Sharing that
-identity also keeps server `owner_device_id` consistent. Do not create separate
-per-adapter plugin logins on the same machine. Phase 1's JSON-lines bridge does
-not read login credentials yet; config sharing belongs to the SDK-backed Sink.
-Never put tokens in source, plugin manifests, or command examples.
-
-### Provider names
-
-Canonical providers are Herdr agent kinds: `claude`, `codex`, `pi`, `omp`,
-`opencode`, and the other recognized kinds. This adapter continues to emit
-`claude`; the Claude hook is being aligned to the same name. Adopt the shared
-provider constants from `github.com/get-outpost/outpost-go` when integrating
-the SDK; no SDK dependency is added in this phase.
-
-### Remaining limits
-
-- **Durability:** snapshots restore current state, not missed history. Adapter
-  state and the memory fake are process-local; a daemon restart republishes
-  active starts and cannot end sessions that vanished while it was stopped.
-  SDK reconnect/backfill must not replay already executed prompts.
-- **Fallback promotion:** grace and tombstones mitigate duplicate sessions;
-  there is no server alias/merge API. Install native Herdr integrations before
-  starting agents. Promotion follows the same agent kind and terminal identity,
-  or pane ID when the previous agent had no terminal identity.
-- **Input identity race:** revalidation reduces pane-reuse risk but the public
-  Herdr API cannot atomically compare an expected native session when admitting
-  input. Queue admission also cannot prove agent execution.
+Tests use fake Herdr sockets, in-memory agent sources and HTTP/WebSocket relay
+servers. Timer tests use `testing/synctest`. Live E2E must use its **own scratch
+pane/agent** and an isolated namespace/state directory; never send test input to
+existing panes. Live test credentials and personal paths must stay outside Git.

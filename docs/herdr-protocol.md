@@ -122,9 +122,9 @@ never be observed. Periodic reconciliation also catches missed invalidations.
 Native session IDs (`agent_session.kind == "id"`, nonempty value) are passed
 through unchanged. Claude therefore uses the **same** `session_id` as its hook,
 not an adapter-prefixed ID. Providers are canonically the Herdr agent kind
-(`claude`, `codex`, `pi`, `omp`, `opencode`, …). The adapter emits `claude`;
-the Claude hook is being aligned to that same value. Shared SDK provider
-constants will replace these strings when the SDK is adopted.
+(`claude`, `codex`, `pi`, `omp`, `opencode`, …). The adapter and Claude hook emit
+`claude`; the SDK defines the canonical provider, event and status constants.
+Unknown Herdr kinds pass through unchanged.
 
 Fallback identity is `herdr:` followed by lowercase hex SHA-256. Each input is a
 UTF-8 string prefixed by its uint64 big-endian byte length; hash these fields:
@@ -189,10 +189,11 @@ bridge waits for observed Herdr state to publish status; it never synthesizes
 ## Daemon versus plugin
 
 **Recommendation: an external long-running daemon, one per Herdr session.**
-It can retain subscriptions, reconnect, reconcile, and later hold the Outpost
-SDK command stream without a terminal UI. Phase 1 supplies the runnable
-foreground JSON-lines bridge; service installation and SDK transport are not
-part of this phase.
+`outpost-herdr run` retains Herdr subscriptions, reconciles current state, and
+holds the public SDK command stream without a terminal UI. The JSON-lines
+dry run remains available. Example launchd/systemd user service files are in
+`docs/services/`; installation is deliberately manual. See the README for durable
+cursor/live-session state, command-age policy and bounded publication flushing.
 
 Herdr 0.9.5 plugins are not limited to event hooks: a manifest supports
 `[[startup]]`, `[[actions]]`, `[[events]]`, `[[panes]]`, builds and link handlers.
