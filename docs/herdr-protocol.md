@@ -1,5 +1,11 @@
 # Herdr protocol and deployment
 
+> **Outdated (2026-11-08).** This targets legacy `herdr` 0.9.5, which is dropped.
+> Herdr now runs on herdr-core (`hc`, [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core)),
+> which has a different API and exposes no agent session IDs or transcript paths.
+> This adapter needs a rewrite. Outpost's adapter contract is in
+> `outpost-server/okf/architecture/harness-adapters.md`.
+
 Investigated against installed **Herdr 0.9.5, private protocol 22**, using
 `herdr --version`, `herdr status server`, `herdr api schema --json`,
 `herdr agent list`, and `herdr session list --json`. These were read-only calls;
@@ -34,8 +40,7 @@ Errors are correlated envelopes, not successful empty results:
 {"id":"request-1","error":{"code":"not_found","message":"agent not found"}}
 ```
 
-ccgram's `herdr_socket.py` uses a 16 MiB frame cap and bounded one-shot calls.
-This client likewise bounds request, response and subscription frames and the
+This client bounds request, response and subscription frames and the
 request/subscribe handshake duration. Quiet live subscriptions do not have a
 request deadline; cancellation closes their connection. A timed-out mutation is
 ambiguous: admission may have occurred. Never automatically retry a prompt or key.
@@ -87,9 +92,7 @@ underscore event names and a tagged `data.type`; subscription-specific status
 frames use dotted names and untagged data. Do not depend on one spelling.
 Events invalidate cached state; they are not a durable ordered log.
 
-**Difference from ccgram's protocol 20/22 notes:** its `herdr_events.py` says pane
-status and exit subscriptions need `pane_id`. The installed protocol-22 schema
-requires a pane ID for `pane.agent_status_changed`, but `pane.exited` is global,
+**Subscription scope:** the installed protocol-22 schema requires a pane ID for `pane.agent_status_changed`, but `pane.exited` is global,
 as are `pane.created`, `pane.closed`, `pane.updated`, `pane.moved`, and
 `pane.agent_detected`. `tab.closed` is also global. The bridge uses global
 lifecycle events and per-pane status subscriptions.
@@ -226,9 +229,8 @@ Do not ship a misleading `[[events]]` daemon launcher.
   and [session endpoint selection](https://github.com/herdrdev/herdr/blob/v0.9.5/src/session.rs).
 - [Herdr 0.9.5 plugins and lifecycle](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/plugins.mdx).
 - [Herdr 0.9.5 agent status semantics](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/agents.mdx).
-- Local reference: `ccgram/src/ccgram/multiplexer/herdr_socket.py`,
-  `herdr_events.py`, `herdr_commands.py`; `herdr-plugin-renamer/herdr-plugin.toml`
-  and `src/main.rs` (`spawn_cold_phase`).
+- Local reference: `herdr-plugin-renamer/herdr-plugin.toml` and `src/main.rs`
+  (`spawn_cold_phase`).
 - [Claude interactive controls](https://code.claude.com/docs/en/interactive-mode).
 - [Codex interrupt keymap](https://github.com/openai/codex/blob/main/codex-rs/tui/src/keymap.rs).
 - [Pi terminal usage](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/usage.md).

@@ -1,5 +1,11 @@
 # Outpost Herdr
 
+> **Outdated (2026-11-08).** This targets legacy `herdr` 0.9.5, which is dropped.
+> Herdr now runs on herdr-core (`hc`, [herdrdev/herdr-core](https://github.com/herdrdev/herdr-core)),
+> which has a different API and exposes no agent session IDs or transcript paths.
+> This adapter needs a rewrite. Outpost's adapter contract is in
+> `outpost-server/okf/architecture/harness-adapters.md`.
+
 A Go daemon translating local Herdr agents into Outpost sessions and routing
 phone messages and interrupts back to their terminal harnesses. Uses the public
 [`outpost-go v0.1.0`](https://github.com/get-outpost/outpost-go) SDK; no server
